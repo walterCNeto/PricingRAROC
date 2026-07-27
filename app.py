@@ -1,13 +1,6 @@
 """
 Interest Rate Loan Pricing — RAROC (Consignado INSS)
-Porte do app Shiny para Streamlit.  Modelo: Walter Correa Neto (BFEng).
-
-Roda de graça no Streamlit Community Cloud.  Arquivo único, sem banco de dados.
-
-Metodologia embarcada = "Consistente" (correções de validação):
-  (1) spread UL apenas sobre o prêmio de capital;
-  (2) base temporal anual = anual (sem o fator n/12 no alvo);
-  (3) comissão/custos integrais (one-time), sem o fator 12/n.
+Autor: Walter Correa Neto.
 """
 
 import io
@@ -117,6 +110,10 @@ st.markdown("""
   div[data-testid="stMetric"] label { color:#cadcfc !important; }
   div[data-testid="stMetricValue"] { color:#fff !important; font-size:2.2rem; }
   .foot { color:#6b7280; font-size:.85rem; margin-top:2rem; }
+  div[data-testid="stButton"] button { border-radius:10px; font-weight:600; padding:.5rem 1.4rem; }
+  .stButton button[kind="primary"], button[data-testid="baseButton-primary"] {
+      background:#01003c !important; border-color:#01003c !important; color:#fff !important; }
+  div[data-testid="stAlert"] { border-radius:10px; }
 </style>
 """, unsafe_allow_html=True)
 
@@ -162,45 +159,57 @@ def precificar(modo_ul, base_cons, comissao_int):
     return dict(funding_cost=funding_cost, s_el=s_el, s_ul=s_ul, alvo=alvo, K=K,
                 taxa_aa=taxa_aa, taxa_am=taxa_am)
 
-res = precificar("premio", True, True)
-
-# ---- resultado ----
+# ---- botão calcular + resultado ----
 st.subheader("Resultado")
-if np.isfinite(res["taxa_aa"]):
-    m1, m2, m3 = st.columns([1, 1, 2])
-    m1.metric("Interest Rate (% a.a.)", f"{res['taxa_aa']*100:.2f}%")
-    m2.metric("Interest Rate (% a.m.)", f"{res['taxa_am']*100:.2f}%")
-    with m3:
-        st.markdown("**Composição (anual)**")
-        st.dataframe(pd.DataFrame({
-            "Componente": ["Funding cost", "Spread EL", "Spread UL", "RAROC alvo", "K_IRB (capital)"],
-            "Valor": [f"{res['funding_cost']*100:.2f}%", f"{res['s_el']*100:.2f}%",
-                      f"{res['s_ul']*100:.2f}%", f"{res['alvo']*100:.2f}%", f"R$ {res['K']:,.2f}"],
-        }), hide_index=True)
-else:
-    st.error("Não foi possível resolver a taxa com esses parâmetros. Revise as entradas.")
 
-# ---- export excel ----
-if np.isfinite(res["taxa_aa"]):
-    export = pd.DataFrame([{
-        "ID Client": ID, "Simulation Date": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
-        "Methodology": "Consistent",
-        "Loan Amount (EAD)": EAD, "Term (months)": prazo, "PD": PD, "LGD": LGD,
-        "Funding Rate - Duration (% a.a.)": di_futuro, "Funding Rate - Risk Free (% a.a.)": di_atual,
-        "Funding Transfer Price (%)": funding_pct, "Capital Premium (p.p.)": custo_capital,
-        "PIS/COFINS Tax (%)": pis, "Commission Fee (%)": comissao, "Admin Costs (%)": custos_adm,
-        "IR + CS Tax (%)": ir_cs, "Risk Weight (FPR)": fator_pond,
-        "Funding Cost (%)": res["funding_cost"], "Spread EL (%)": res["s_el"],
-        "Spread UL (%)": res["s_ul"], "K_IRB (R$)": res["K"],
-        "Min Interest Rate (a.a.)": res["taxa_aa"], "Min Interest Rate (a.m.)": res["taxa_am"],
-        "Author": "WalterCN - Banking Financial Engineering - BFEng",
-    }])
-    buf = io.BytesIO()
-    with pd.ExcelWriter(buf, engine="openpyxl") as w:
-        export.to_excel(w, index=False, sheet_name="Simulation")
-    st.download_button("⬇️ Baixar Excel", buf.getvalue(),
-                       file_name=f"Simulation_{datetime.now():%Y-%m-%d}_BFEng.xlsx",
-                       mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet")
+if st.button("📊 Calcular taxa", type="primary"):
+    st.session_state["calc"] = {
+        "res": precificar("premio", True, True),
+        "inputs": dict(ID=ID, EAD=EAD, prazo=prazo, PD=PD, LGD=LGD, di_futuro=di_futuro,
+                       di_atual=di_atual, funding_pct=funding_pct, custo_capital=custo_capital,
+                       pis=pis, comissao=comissao, custos_adm=custos_adm, ir_cs=ir_cs,
+                       fator_pond=fator_pond),
+    }
+
+if "calc" not in st.session_state:
+    st.caption("Ajuste os parâmetros acima e clique em **Calcular taxa**.")
+else:
+    res = st.session_state["calc"]["res"]
+    inp = st.session_state["calc"]["inputs"]
+    if not np.isfinite(res["taxa_aa"]):
+        st.error("Não foi possível resolver a taxa com esses parâmetros. Revise as entradas.")
+    else:
+        st.success("✓ Cálculo realizado")
+        m1, m2, m3 = st.columns([1, 1, 2])
+        m1.metric("Interest Rate (% a.a.)", f"{res['taxa_aa']*100:.2f}%")
+        m2.metric("Interest Rate (% a.m.)", f"{res['taxa_am']*100:.2f}%")
+        with m3:
+            st.markdown("**Composição (anual)**")
+            st.dataframe(pd.DataFrame({
+                "Componente": ["Funding cost", "Spread EL", "Spread UL", "RAROC alvo", "K_IRB (capital)"],
+                "Valor": [f"{res['funding_cost']*100:.2f}%", f"{res['s_el']*100:.2f}%",
+                          f"{res['s_ul']*100:.2f}%", f"{res['alvo']*100:.2f}%", f"R$ {res['K']:,.2f}"],
+            }), hide_index=True)
+
+        export = pd.DataFrame([{
+            "ID Client": inp["ID"], "Simulation Date": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+            "Methodology": "Consistent",
+            "Loan Amount (EAD)": inp["EAD"], "Term (months)": inp["prazo"], "PD": inp["PD"], "LGD": inp["LGD"],
+            "Funding Rate - Duration (% a.a.)": inp["di_futuro"], "Funding Rate - Risk Free (% a.a.)": inp["di_atual"],
+            "Funding Transfer Price (%)": inp["funding_pct"], "Capital Premium (p.p.)": inp["custo_capital"],
+            "PIS/COFINS Tax (%)": inp["pis"], "Commission Fee (%)": inp["comissao"], "Admin Costs (%)": inp["custos_adm"],
+            "IR + CS Tax (%)": inp["ir_cs"], "Risk Weight (FPR)": inp["fator_pond"],
+            "Funding Cost (%)": res["funding_cost"], "Spread EL (%)": res["s_el"],
+            "Spread UL (%)": res["s_ul"], "K_IRB (R$)": res["K"],
+            "Min Interest Rate (a.a.)": res["taxa_aa"], "Min Interest Rate (a.m.)": res["taxa_am"],
+            "Author": "WalterCN - Banking Financial Engineering - BFEng",
+        }])
+        buf = io.BytesIO()
+        with pd.ExcelWriter(buf, engine="openpyxl") as w:
+            export.to_excel(w, index=False, sheet_name="Simulation")
+        st.download_button("⬇️ Baixar Excel", buf.getvalue(),
+                           file_name=f"Simulation_{datetime.now():%Y-%m-%d}_BFEng.xlsx",
+                           mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet")
 
 st.markdown(
     '<div class="foot">paper: '
