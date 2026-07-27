@@ -46,11 +46,8 @@ def spread_ul(EAD, LGD, PD, prazo, funding_cost, rho, premio_capital,
     PD_LT = 1 - (1 - PD) ** (prazo / 12)
     ELR = PD_LT * LGD
     if modo == "premio":
-        # recomendado: o capital já rende a taxa livre de risco no numerador do
-        # RAROC, então o spread cobre apenas o prêmio de capital exigido.
         excesso = premio_capital
-    else:
-        # legado (Shiny): re = funding + prêmio, subtraindo di_futuro.
+    else:        
         excesso = (funding_cost + premio_capital) - di_futuro
     return (K / EAD) * excesso / (1 - ELR)
 
@@ -73,13 +70,12 @@ def calculate_RAROC(interest_rate, EAD, LGD, PD, rho, funding_cost, prazo,
     piso = 8 / 100 * fator_pond * EAD
     cap = max(capital, piso)
     num = RGO + cap * ((1 + di_atual) ** (prazo / 12) - 1)
-    return (num / cap) * (12 / prazo)                 # RAROC anualizado [% a.a.]
+    return (num / cap) * (12 / prazo) 
 
 
 def otimizar_taxa(EAD, LGD, PD, rho, funding_cost, prazo, alvo_anual,
                   pis_cofins, comissao, custos_adm, ir_cs, fator_pond, di_atual,
-                  base_consistente=True, comissao_integral=True):
-    # alvo: consistente (anual = anual) vs legado (acumulado na vida, x n/12)
+                  base_consistente=True, comissao_integral=True):    
     target = alvo_anual if base_consistente else (alvo_anual * prazo / 12)
 
     def f(i):
@@ -90,11 +86,6 @@ def otimizar_taxa(EAD, LGD, PD, rho, funding_cost, prazo, alvo_anual,
         return brentq(f, 1e-4, 5.0, xtol=1e-10)
     except ValueError:
         return float("nan")
-
-
-# ----------------------------------------------------------------------------
-#  INTERFACE
-# ----------------------------------------------------------------------------
 
 st.set_page_config(page_title="Interest Rate Loan Pricing", page_icon="📊", layout="wide")
 
@@ -202,13 +193,13 @@ else:
             "Funding Cost (%)": res["funding_cost"], "Spread EL (%)": res["s_el"],
             "Spread UL (%)": res["s_ul"], "K_IRB (R$)": res["K"],
             "Min Interest Rate (a.a.)": res["taxa_aa"], "Min Interest Rate (a.m.)": res["taxa_am"],
-            "Author": "Walter Correa Neto, deleite-se",
+            "Author": "Walter Correa Neto (WCN)",
         }])
         buf = io.BytesIO()
         with pd.ExcelWriter(buf, engine="openpyxl") as w:
             export.to_excel(w, index=False, sheet_name="Simulation")
         st.download_button("⬇️ Baixar Excel", buf.getvalue(),
-                           file_name=f"Simulation_{datetime.now():%Y-%m-%d}_BFEng.xlsx",
+                           file_name=f"Simulation_{datetime.now():%Y-%m-%d}_WCN.xlsx",
                            mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet")
 
 st.markdown(
