@@ -118,7 +118,7 @@ st.markdown("""
 """, unsafe_allow_html=True)
 
 st.title("Interest Rate Loan Pricing")
-st.caption("Financial Engineering for Bankers · precificação RAROC ajustada ao risco")
+st.caption("precificação RAROC a partir de ROE endógeno")
 
 # ---- entradas ----
 st.subheader("Parâmetros da operação")
@@ -202,7 +202,7 @@ else:
             "Funding Cost (%)": res["funding_cost"], "Spread EL (%)": res["s_el"],
             "Spread UL (%)": res["s_ul"], "K_IRB (R$)": res["K"],
             "Min Interest Rate (a.a.)": res["taxa_aa"], "Min Interest Rate (a.m.)": res["taxa_am"],
-            "Author": "WalterCN - Banking Financial Engineering - BFEng",
+            "Author": "Walter Correa Neto, deleite-se",
         }])
         buf = io.BytesIO()
         with pd.ExcelWriter(buf, engine="openpyxl") as w:
@@ -212,7 +212,6 @@ else:
                            mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet")
 
 st.markdown(
-    '<div class="foot">paper: '
-    '<a href="https://rpubs.com/WalterCN/RarocPricing" target="_blank">Link</a> · '
+    '<div class="foot">paper: '    
     'contato: <a href="mailto:walter.correa.neto@gmail.com">walter.correa.neto@gmail.com</a></div>',
     unsafe_allow_html=True)
