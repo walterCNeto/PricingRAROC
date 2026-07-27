@@ -4,11 +4,10 @@ Porte do app Shiny para Streamlit.  Modelo: Walter Correa Neto (BFEng).
 
 Roda de graça no Streamlit Community Cloud.  Arquivo único, sem banco de dados.
 
-Metodologia PADRÃO = "Consistente": incorpora as correções de validação
+Metodologia embarcada = "Consistente" (correções de validação):
   (1) spread UL apenas sobre o prêmio de capital;
   (2) base temporal anual = anual (sem o fator n/12 no alvo);
   (3) comissão/custos integrais (one-time), sem o fator 12/n.
-O modo "Legado" reproduz exatamente os números do app Shiny / dissertação.
 """
 
 import io
@@ -146,18 +145,7 @@ with c4:
     fator_pond = st.number_input("Risk Weighting (FPR)", 0.0, 0.99, 0.50, 0.01)
     ir_cs = st.number_input("IR/CS Tax", 0.0, 0.80, 0.40, 0.01)
 
-# ---- metodologia ----
-metodo = st.radio(
-    "Metodologia de cálculo",
-    ["Consistente (recomendado)", "Legado — reproduz a Shiny/dissertação"],
-    index=0, horizontal=True,
-    help=("Consistente aplica as correções de validação: spread UL só sobre o prêmio de "
-          "capital, base temporal anual=anual e comissão/custos integrais (one-time). "
-          "Legado reproduz exatamente o número do app Shiny."),
-)
-_consistente = metodo.startswith("Consistente")
-
-# ---- cálculo (parametrizado pela metodologia) ----
+# ---- cálculo (metodologia consistente — embarcada) ----
 def precificar(modo_ul, base_cons, comissao_int):
     rho = calcular_rho(PD, prazo)
     funding_cost = (di_futuro / 100) * (funding_pct / 100)
@@ -174,14 +162,7 @@ def precificar(modo_ul, base_cons, comissao_int):
     return dict(funding_cost=funding_cost, s_el=s_el, s_ul=s_ul, alvo=alvo, K=K,
                 taxa_aa=taxa_aa, taxa_am=taxa_am)
 
-if _consistente:
-    res = precificar("premio", True, True)
-    res_alt = precificar("fiel", False, False)
-    alt_nome = "Legado (Shiny)"
-else:
-    res = precificar("fiel", False, False)
-    res_alt = precificar("premio", True, True)
-    alt_nome = "Consistente"
+res = precificar("premio", True, True)
 
 # ---- resultado ----
 st.subheader("Resultado")
@@ -196,10 +177,6 @@ if np.isfinite(res["taxa_aa"]):
             "Valor": [f"{res['funding_cost']*100:.2f}%", f"{res['s_el']*100:.2f}%",
                       f"{res['s_ul']*100:.2f}%", f"{res['alvo']*100:.2f}%", f"R$ {res['K']:,.2f}"],
         }), hide_index=True)
-    if np.isfinite(res_alt["taxa_am"]):
-        st.caption(f"Metodologia ativa: **{'Consistente' if _consistente else 'Legado'}**. "
-                   f"Para referência, o modo **{alt_nome}** daria "
-                   f"{res_alt['taxa_aa']*100:.2f}% a.a. = {res_alt['taxa_am']*100:.2f}% a.m.")
 else:
     st.error("Não foi possível resolver a taxa com esses parâmetros. Revise as entradas.")
 
@@ -207,7 +184,7 @@ else:
 if np.isfinite(res["taxa_aa"]):
     export = pd.DataFrame([{
         "ID Client": ID, "Simulation Date": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
-        "Methodology": "Consistent" if _consistente else "Legacy (Shiny)",
+        "Methodology": "Consistent",
         "Loan Amount (EAD)": EAD, "Term (months)": prazo, "PD": PD, "LGD": LGD,
         "Funding Rate - Duration (% a.a.)": di_futuro, "Funding Rate - Risk Free (% a.a.)": di_atual,
         "Funding Transfer Price (%)": funding_pct, "Capital Premium (p.p.)": custo_capital,
