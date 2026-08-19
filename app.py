@@ -1,6 +1,13 @@
 """
 Interest Rate Loan Pricing — RAROC (Consignado INSS)
-Autor: Walter Correa Neto.
+Porte do app Shiny para Streamlit.  Modelo: Walter Correa Neto (BFEng).
+
+Roda de graça no Streamlit Community Cloud.  Arquivo único, sem banco de dados.
+
+Metodologia embarcada = "Consistente" (correções de validação):
+  (1) spread UL apenas sobre o prêmio de capital;
+  (2) base temporal anual = anual (sem o fator n/12 no alvo);
+  (3) comissão/custos integrais (one-time), sem o fator 12/n.
 """
 
 import io
@@ -46,15 +53,18 @@ def spread_ul(EAD, LGD, PD, prazo, funding_cost, rho, premio_capital,
     PD_LT = 1 - (1 - PD) ** (prazo / 12)
     ELR = PD_LT * LGD
     if modo == "premio":
+        # recomendado: o capital já rende a taxa livre de risco no numerador do
+        # RAROC, então o spread cobre apenas o prêmio de capital exigido.
         excesso = premio_capital
-    else:        
+    else:
+        # legado (Shiny): re = funding + prêmio, subtraindo di_futuro.
         excesso = (funding_cost + premio_capital) - di_futuro
     return (K / EAD) * excesso / (1 - ELR)
 
 
 def calculate_RAROC(interest_rate, EAD, LGD, PD, rho, funding_cost, prazo,
                     pis_cofins, comissao, custos_adm, ir_cs, fator_pond, di_atual,
-                    comissao_integral=True):
+                    comissao_integral=True, tarifa=0.0):
     im = (1 + interest_rate) ** (1 / 12) - 1
     fm = (1 + funding_cost) ** (1 / 12) - 1
     capital = calculate_IRB_capital(EAD, LGD, PD, rho, prazo)
@@ -65,27 +75,48 @@ def calculate_RAROC(interest_rate, EAD, LGD, PD, rho, funding_cost, prazo,
     PB = R - C
     pisc = PB * pis_cofins
     fator_custo = 1.0 if comissao_integral else (12 * (1 / prazo))
-    LAIR = PB - pisc - EL - (comissao * EAD * fator_custo) - (custos_adm * EAD * fator_custo)
+    # tarifa = receita de originação (one-time); comissão/custos = despesa (one-time)
+    LAIR = (PB - pisc - EL
+            - (comissao * EAD * fator_custo) - (custos_adm * EAD * fator_custo)
+            + (tarifa * EAD * fator_custo))
     RGO = LAIR - LAIR * ir_cs
     piso = 8 / 100 * fator_pond * EAD
     cap = max(capital, piso)
     num = RGO + cap * ((1 + di_atual) ** (prazo / 12) - 1)
-    return (num / cap) * (12 / prazo) 
+    return (num / cap) * (12 / prazo)                 # RAROC anualizado [% a.a.]
 
 
 def otimizar_taxa(EAD, LGD, PD, rho, funding_cost, prazo, alvo_anual,
                   pis_cofins, comissao, custos_adm, ir_cs, fator_pond, di_atual,
-                  base_consistente=True, comissao_integral=True):    
+                  base_consistente=True, comissao_integral=True, tarifa=0.0):
+    # alvo: consistente (anual = anual) vs legado (acumulado na vida, x n/12)
     target = alvo_anual if base_consistente else (alvo_anual * prazo / 12)
 
     def f(i):
         return calculate_RAROC(i, EAD, LGD, PD, rho, funding_cost, prazo,
                                pis_cofins, comissao, custos_adm, ir_cs, fator_pond,
-                               di_atual, comissao_integral) - target
+                               di_atual, comissao_integral, tarifa) - target
     try:
         return brentq(f, 1e-4, 5.0, xtol=1e-10)
     except ValueError:
         return float("nan")
+
+
+def taxa_efetiva_ifrs9(EAD, PMT, prazo, tarifa, comissao, custos_adm):
+    """TIR mensal que amortiza custos/receitas de originação (custo amortizado IFRS 9).
+    V0 = EAD - tarifa + comissão + custos  (ativo reconhecido inicialmente)."""
+    V0 = EAD - tarifa * EAD + comissao * EAD + custos_adm * EAD
+    try:
+        r = brentq(lambda x: sum(PMT / (1 + x) ** t for t in range(1, prazo + 1)) - V0,
+                   1e-9, 1.0, xtol=1e-12)
+        return r, (1 + r) ** 12 - 1, V0
+    except ValueError:
+        return float("nan"), float("nan"), V0
+
+
+# ----------------------------------------------------------------------------
+#  INTERFACE
+# ----------------------------------------------------------------------------
 
 st.set_page_config(page_title="Interest Rate Loan Pricing", page_icon="📊", layout="wide")
 
@@ -109,7 +140,7 @@ st.markdown("""
 """, unsafe_allow_html=True)
 
 st.title("Interest Rate Loan Pricing")
-st.caption("precificação RAROC a partir de ROE endógeno")
+st.caption("Financial Engineering for Bankers · precificação RAROC ajustada ao risco")
 
 # ---- entradas ----
 st.subheader("Parâmetros da operação")
@@ -132,6 +163,8 @@ with c3:
 with c4:
     fator_pond = st.number_input("Risk Weighting (FPR)", 0.0, 0.99, 0.50, 0.01)
     ir_cs = st.number_input("IR/CS Tax", 0.0, 0.80, 0.40, 0.01)
+    tarifa = st.number_input("Tarifa (fee cobrada, s/ EAD)", 0.0, 0.50, 0.00, 0.01,
+                             help="Receita de originação cobrada uma vez sobre o valor liberado. Pode ser 0.")
 
 # ---- cálculo (metodologia consistente — embarcada) ----
 def precificar(modo_ul, base_cons, comissao_int):
@@ -145,10 +178,19 @@ def precificar(modo_ul, base_cons, comissao_int):
     K = calculate_IRB_capital(EAD, LGD, PD, rho, prazo)
     taxa_aa = otimizar_taxa(EAD, LGD, PD, rho, funding_cost, prazo, alvo,
                             pis, comissao, custos_adm, ir_cs, fator_pond, di_atual / 100,
-                            base_consistente=base_cons, comissao_integral=comissao_int)
+                            base_consistente=base_cons, comissao_integral=comissao_int,
+                            tarifa=tarifa)
     taxa_am = (1 + taxa_aa) ** (1 / 12) - 1 if np.isfinite(taxa_aa) else float("nan")
+    # taxa efetiva contábil (IFRS 9): amortiza tarifa/comissão/custos pela TIR do fluxo
+    if np.isfinite(taxa_am):
+        PMT = calculate_pmt(EAD, taxa_am, prazo)
+        ef_am, ef_aa, V0 = taxa_efetiva_ifrs9(EAD, PMT, prazo, tarifa, comissao, custos_adm)
+    else:
+        ef_am = ef_aa = float("nan")
+        V0 = EAD - tarifa * EAD + comissao * EAD + custos_adm * EAD
     return dict(funding_cost=funding_cost, s_el=s_el, s_ul=s_ul, alvo=alvo, K=K,
-                taxa_aa=taxa_aa, taxa_am=taxa_am)
+                taxa_aa=taxa_aa, taxa_am=taxa_am, tarifa=tarifa, V0=V0,
+                taxa_ef_am=ef_am, taxa_ef_aa=ef_aa)
 
 # ---- botão calcular + resultado ----
 st.subheader("Resultado")
@@ -159,7 +201,7 @@ if st.button("📊 Calcular taxa", type="primary"):
         "inputs": dict(ID=ID, EAD=EAD, prazo=prazo, PD=PD, LGD=LGD, di_futuro=di_futuro,
                        di_atual=di_atual, funding_pct=funding_pct, custo_capital=custo_capital,
                        pis=pis, comissao=comissao, custos_adm=custos_adm, ir_cs=ir_cs,
-                       fator_pond=fator_pond),
+                       fator_pond=fator_pond, tarifa=tarifa),
     }
 
 if "calc" not in st.session_state:
@@ -171,38 +213,50 @@ else:
         st.error("Não foi possível resolver a taxa com esses parâmetros. Revise as entradas.")
     else:
         st.success("✓ Cálculo realizado")
-        m1, m2, m3 = st.columns([1, 1, 2])
-        m1.metric("Interest Rate (% a.a.)", f"{res['taxa_aa']*100:.2f}%")
-        m2.metric("Interest Rate (% a.m.)", f"{res['taxa_am']*100:.2f}%")
-        with m3:
-            st.markdown("**Composição (anual)**")
-            st.dataframe(pd.DataFrame({
-                "Componente": ["Funding cost", "Spread EL", "Spread UL", "RAROC alvo", "K_IRB (capital)"],
-                "Valor": [f"{res['funding_cost']*100:.2f}%", f"{res['s_el']*100:.2f}%",
-                          f"{res['s_ul']*100:.2f}%", f"{res['alvo']*100:.2f}%", f"R$ {res['K']:,.2f}"],
-            }), hide_index=True)
+        st.markdown("**Taxa nominal (contrato)**")
+        n1, n2 = st.columns(2)
+        n1.metric("Nominal (% a.a.)", f"{res['taxa_aa']*100:.2f}%")
+        n2.metric("Nominal (% a.m.)", f"{res['taxa_am']*100:.2f}%")
+        st.markdown("**Taxa efetiva contábil — IFRS 9 / CMN 4.966**")
+        e1, e2 = st.columns(2)
+        e1.metric("Efetiva (% a.a.)", f"{res['taxa_ef_aa']*100:.2f}%" if np.isfinite(res['taxa_ef_aa']) else "—")
+        e2.metric("Efetiva (% a.m.)", f"{res['taxa_ef_am']*100:.2f}%" if np.isfinite(res['taxa_ef_am']) else "—")
+        st.caption("A efetiva é a TIR que amortiza tarifa (receita) e comissão/custos de originação "
+                   f"ao longo da vida. Ativo reconhecido inicialmente (V₀) = R$ {res['V0']:,.2f}.")
+        st.markdown("**Composição (anual)**")
+        st.dataframe(pd.DataFrame({
+            "Componente": ["Funding cost", "Spread EL", "Spread UL", "RAROC alvo",
+                           "K_IRB (capital)", "Tarifa (receita orig.)", "Ativo reconhecido (V₀)"],
+            "Valor": [f"{res['funding_cost']*100:.2f}%", f"{res['s_el']*100:.2f}%",
+                      f"{res['s_ul']*100:.2f}%", f"{res['alvo']*100:.2f}%", f"R$ {res['K']:,.2f}",
+                      f"R$ {res['tarifa']*inp['EAD']:,.2f}", f"R$ {res['V0']:,.2f}"],
+        }), hide_index=True)
 
         export = pd.DataFrame([{
             "ID Client": inp["ID"], "Simulation Date": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
-            "Methodology": "RAROC = ROE_e",
+            "Methodology": "Consistent",
             "Loan Amount (EAD)": inp["EAD"], "Term (months)": inp["prazo"], "PD": inp["PD"], "LGD": inp["LGD"],
             "Funding Rate - Duration (% a.a.)": inp["di_futuro"], "Funding Rate - Risk Free (% a.a.)": inp["di_atual"],
             "Funding Transfer Price (%)": inp["funding_pct"], "Capital Premium (p.p.)": inp["custo_capital"],
             "PIS/COFINS Tax (%)": inp["pis"], "Commission Fee (%)": inp["comissao"], "Admin Costs (%)": inp["custos_adm"],
             "IR + CS Tax (%)": inp["ir_cs"], "Risk Weight (FPR)": inp["fator_pond"],
+            "Tarifa (%)": inp["tarifa"],
             "Funding Cost (%)": res["funding_cost"], "Spread EL (%)": res["s_el"],
             "Spread UL (%)": res["s_ul"], "K_IRB (R$)": res["K"],
+            "Accounting Asset V0 (R$)": res["V0"],
             "Min Interest Rate (a.a.)": res["taxa_aa"], "Min Interest Rate (a.m.)": res["taxa_am"],
-            "Author": "Walter Correa Neto (WCN)",
+            "Effective Rate IFRS9 (a.a.)": res["taxa_ef_aa"], "Effective Rate IFRS9 (a.m.)": res["taxa_ef_am"],
+            "Author": "WalterCN - Banking Financial Engineering - BFEng",
         }])
         buf = io.BytesIO()
         with pd.ExcelWriter(buf, engine="openpyxl") as w:
             export.to_excel(w, index=False, sheet_name="Simulation")
         st.download_button("⬇️ Baixar Excel", buf.getvalue(),
-                           file_name=f"Simulation_{datetime.now():%Y-%m-%d}_WCN.xlsx",
+                           file_name=f"Simulation_{datetime.now():%Y-%m-%d}_BFEng.xlsx",
                            mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet")
 
 st.markdown(
-    '<div class="foot">paper: '    
+    '<div class="foot">paper: '
+    '<a href="https://rpubs.com/WalterCN/RarocPricing" target="_blank">Link</a> · '
     'contato: <a href="mailto:walter.correa.neto@gmail.com">walter.correa.neto@gmail.com</a></div>',
     unsafe_allow_html=True)
