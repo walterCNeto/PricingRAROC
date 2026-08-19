@@ -260,6 +260,30 @@ else:
         e2.metric("Efetiva (% a.m.)", f"{res['taxa_ef_am']*100:.2f}%" if np.isfinite(res['taxa_ef_am']) else "—")
         st.caption("A efetiva é a TIR que amortiza tarifa (receita) e comissão/custos de originação "
                    f"ao longo da vida. Ativo reconhecido inicialmente (V₀) = R$ {res['V0']:,.2f}.")
+
+        with st.expander("ℹ️ Por que a taxa nominal difere da efetiva (IFRS 9)?"):
+            st.markdown(
+"""A taxa **nominal** e a **efetiva (IFRS 9 / CMN 4.966)** usam o **mesmo fluxo de parcelas** — o que muda é a **base** contra a qual esse fluxo é medido, não o regime de tempo:
+
+- **Nominal** = TIR das parcelas contra o **valor de face** (EAD contratado).
+- **Efetiva** = TIR das mesmas parcelas contra o **valor contábil inicial** do ativo: **V₀ = EAD − tarifa + comissão + custos de originação**.
+
+A comissão (despesa) *aumenta* V₀ → a efetiva fica **abaixo** da nominal. A tarifa (receita) *reduz* V₀ → a efetiva **sobe**. A diferença é o **efeito líquido dos ajustes de originação** embutidos em V₀ — e não uma questão de caixa vs. competência.
+
+Quando **tarifa = comissão**, elas se cancelam em V₀, que volta a se aproximar do EAD, e a efetiva **converge** para a nominal. Zerando também os custos de originação, V₀ = EAD e as duas taxas ficam **idênticas**.""")
+            st.caption(f"Nesta operação: nominal {res['taxa_am']*100:.3f}% a.m. · efetiva "
+                       f"{res['taxa_ef_am']*100:.3f}% a.m. · V₀ = R$ {res['V0']:,.2f} · "
+                       f"diferença ≈ {(res['taxa_am']-res['taxa_ef_am'])*1e4:.0f} bps.")
+            st.table(pd.DataFrame({
+                "Cenário (comissão 6%)": ["Tarifa 0%", "Tarifa 6% (= comissão)"],
+                "Nominal a.m.": ["2,160%", "1,720%"],
+                "Efetiva a.m.": ["1,567%", "1,634%"],
+                "V₀": ["R$ 5.350", "R$ 5.050"],
+                "Diferença": ["~59 bps", "~9 bps"],
+            }))
+            st.caption("O resíduo de ~9 bps vem dos custos administrativos (1%) que permanecem em "
+                       "V₀; sem eles, V₀ = EAD e nominal = efetiva.")
+
         st.markdown("**CET — Custo Efetivo Total (olhar do cliente)**")
         t1, t2 = st.columns(2)
         t1.metric("CET (% a.a.)", f"{res['cet_aa']*100:.2f}%" if np.isfinite(res['cet_aa']) else "—")
