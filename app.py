@@ -120,18 +120,44 @@ def iof_pf(valor, prazo_meses, aliq_adicional=0.0038, aliq_diaria=0.000082):
     return valor * aliq_adicional + valor * aliq_diaria * dias
 
 
-def calcular_cet(EAD, PMT, prazo, tarifa, seguro, iof_valor):
+def montar_operacao(EAD_sol, prazo, tarifa, seguro, incluir_iof,
+                    iof_add, iof_dia, regime="financiado"):
+    """Monta a operação a partir do valor pedido pelo cliente.
+
+    regime="financiado" (padrão, consignado): o cliente recebe o valor que pediu e
+      IOF + tarifa + seguro entram no valor financiado (pagos diluídos na parcela).
+      Como o IOF incide sobre o próprio financiado, há circularidade — resolvida em
+      forma fechada:  F = (EAD + tarifa + seguro) / (1 - k),  k = alíquota total.
+    regime="retido": encargos descontados da liberação (financiado = EAD pedido).
+
+    Retorna: financiado (EAD de risco), IOF R$, líquido liberado, tarifa R$, seguro R$.
+    """
+    tarifa_rs = tarifa * EAD_sol
+    seguro_rs = seguro * EAD_sol
+    if regime == "financiado":
+        dias = min(prazo * 30, 365)
+        k = (iof_add + iof_dia * dias) if incluir_iof else 0.0
+        financiado = (EAD_sol + tarifa_rs + seguro_rs) / (1 - k)
+        iof_val = financiado * k
+        liquido = EAD_sol                       # recebe cheio o que pediu
+    else:
+        iof_val = iof_pf(EAD_sol, prazo, iof_add, iof_dia) if incluir_iof else 0.0
+        financiado = EAD_sol
+        liquido = EAD_sol - tarifa_rs - seguro_rs - iof_val
+    return financiado, iof_val, liquido, tarifa_rs, seguro_rs
+
+
+def calcular_cet(PMT, prazo, liquido):
     """CET (custo efetivo total, olhar do cliente): TIR que iguala o valor líquido
-    recebido (EAD - tarifa - IOF - seguro) ao fluxo de parcelas que o cliente paga."""
-    liquido = EAD - tarifa * EAD - seguro * EAD - iof_valor
+    efetivamente recebido ao fluxo de parcelas que o cliente paga."""
     if liquido <= 0:
-        return float("nan"), float("nan"), liquido
+        return float("nan"), float("nan")
     try:
         r = brentq(lambda x: sum(PMT / (1 + x) ** t for t in range(1, prazo + 1)) - liquido,
                    1e-9, 2.0, xtol=1e-12)
-        return r, (1 + r) ** 12 - 1, liquido
+        return r, (1 + r) ** 12 - 1
     except ValueError:
-        return float("nan"), float("nan"), liquido
+        return float("nan"), float("nan")
 
 
 def brl(x):
@@ -151,8 +177,8 @@ def pct(x):
 def gerar_demonstrativo(ID, res, EAD, prazo, seguro):
     """Documento voltado ao CLIENTE — apenas o que o banco pode/deve divulgar.
     NÃO inclui funding, spreads, RAROC, K_IRB, comissão, PD/LGD ou taxa efetiva IFRS 9."""
-    tarifa_rs = res["tarifa"] * EAD
-    seguro_rs = seguro * EAD
+    tarifa_rs = res["tarifa_rs"]
+    seguro_rs = res["seguro_rs"]
     total = res["parcela"] * prazo if np.isfinite(res["parcela"]) else float("nan")
     L = []
     L.append("DEMONSTRATIVO DE CUSTO EFETIVO TOTAL (CET)")
@@ -162,11 +188,14 @@ def gerar_demonstrativo(ID, res, EAD, prazo, seguro):
     L.append(f"Data         : {datetime.now().strftime('%d/%m/%Y %H:%M')}")
     L.append("")
     L.append("VALORES")
-    L.append(f"  Valor da operação (financiado) ... {brl(EAD)}")
+    L.append(f"  Valor solicitado ................. {brl(EAD)}")
     L.append(f"  IOF .............................. {brl(res['iof_val'])}")
     L.append(f"  Tarifa de cadastro ............... {brl(tarifa_rs)}")
     L.append(f"  Seguro ........................... {brl(seguro_rs)}")
+    L.append(f"  Valor total financiado ........... {brl(res['financiado'])}")
     L.append(f"  Valor líquido liberado ao cliente  {brl(res['liquido'])}")
+    if res.get("regime") == "financiado":
+        L.append("  (IOF, tarifa e seguro financiados e diluídos nas parcelas)")
     L.append("")
     L.append("CONDIÇÕES DE PAGAMENTO")
     L.append(f"  Prazo ............................ {prazo} meses")
@@ -238,7 +267,14 @@ with c4:
     tarifa = st.number_input("Tarifa (fee cobrada, s/ EAD)", 0.0, 0.50, 0.00, 0.01,
                              help="Receita de originação cobrada uma vez sobre o valor liberado. Pode ser 0.")
 
-with st.expander("Encargos ao cliente — para o CET (opcional)"):
+with st.expander("Encargos ao cliente — regime, IOF e seguro"):
+    regime = st.radio(
+        "Regime dos encargos (IOF, tarifa e seguro)",
+        ["Financiados (cliente recebe o valor pedido)", "Retidos (descontados da liberação)"],
+        index=0, horizontal=True,
+        help="No regime financiado o cliente recebe o valor que pediu e os encargos entram "
+             "no valor financiado — logo, também na exposição de risco e na parcela.")
+    regime_key = "financiado" if regime.startswith("Financiados") else "retido"
     ec1, ec2, ec3 = st.columns(3)
     seguro = ec1.number_input("Seguro (s/ EAD)", 0.0, 0.50, 0.00, 0.01,
                               help="Prêmio de seguro retido na originação. Pode ser 0.")
@@ -250,34 +286,39 @@ with st.expander("Encargos ao cliente — para o CET (opcional)"):
 
 # ---- cálculo (metodologia consistente — embarcada) ----
 def precificar(modo_ul, base_cons, comissao_int):
+    # 1) monta a operação: o EAD digitado é o valor PEDIDO pelo cliente
+    F, iof_val, liquido, tarifa_rs, seguro_rs = montar_operacao(
+        EAD, prazo, tarifa, seguro, incluir_iof, iof_add, iof_dia, regime_key)
+
+    # 2) risco e precificação rodam sobre o valor FINANCIADO (a exposição do banco)
+    tarifa_ratio = tarifa_rs / F                  # tarifa em R$ fixo, expressa s/ o financiado
     rho = calcular_rho(PD, prazo)
     funding_cost = (di_futuro / 100) * (funding_pct / 100)
     premio = custo_capital / 100
     s_el = spread_el(PD, LGD, prazo, funding_cost)
-    s_ul = spread_ul(EAD, LGD, PD, prazo, funding_cost, rho, premio,
+    s_ul = spread_ul(F, LGD, PD, prazo, funding_cost, rho, premio,
                      di_futuro / 100, di_atual / 100, modo=modo_ul)
     alvo = funding_cost + s_el + s_ul
-    K = calculate_IRB_capital(EAD, LGD, PD, rho, prazo)
-    taxa_aa = otimizar_taxa(EAD, LGD, PD, rho, funding_cost, prazo, alvo,
+    K = calculate_IRB_capital(F, LGD, PD, rho, prazo)
+    taxa_aa = otimizar_taxa(F, LGD, PD, rho, funding_cost, prazo, alvo,
                             pis, comissao, custos_adm, ir_cs, fator_pond, di_atual / 100,
                             base_consistente=base_cons, comissao_integral=comissao_int,
-                            tarifa=tarifa)
+                            tarifa=tarifa_ratio)
     taxa_am = (1 + taxa_aa) ** (1 / 12) - 1 if np.isfinite(taxa_aa) else float("nan")
     if np.isfinite(taxa_am):
-        PMT = calculate_pmt(EAD, taxa_am, prazo)
+        # 3) parcela sobre o financiado (IOF/tarifa/seguro diluídos, no regime financiado)
+        PMT = calculate_pmt(F, taxa_am, prazo)
         # taxa efetiva contábil (IFRS 9): amortiza tarifa/comissão/custos pela TIR
-        ef_am, ef_aa, V0 = taxa_efetiva_ifrs9(EAD, PMT, prazo, tarifa, comissao, custos_adm)
-        # CET (olhar do cliente): TIR sobre o líquido recebido, com IOF/tarifa/seguro
-        iof_val = iof_pf(EAD, prazo, iof_add, iof_dia) if incluir_iof else 0.0
-        cet_am, cet_aa, liquido = calcular_cet(EAD, PMT, prazo, tarifa, seguro, iof_val)
+        ef_am, ef_aa, V0 = taxa_efetiva_ifrs9(F, PMT, prazo, tarifa_ratio, comissao, custos_adm)
+        # CET (olhar do cliente): TIR das parcelas contra o que ele recebeu de fato
+        cet_am, cet_aa = calcular_cet(PMT, prazo, liquido)
     else:
         ef_am = ef_aa = cet_am = cet_aa = float("nan")
-        iof_val = 0.0
-        V0 = EAD - tarifa * EAD + comissao * EAD + custos_adm * EAD
-        liquido = float("nan")
+        V0 = F - tarifa_rs + comissao * F + custos_adm * F
         PMT = float("nan")
     return dict(funding_cost=funding_cost, s_el=s_el, s_ul=s_ul, alvo=alvo, K=K,
                 taxa_aa=taxa_aa, taxa_am=taxa_am, tarifa=tarifa, V0=V0,
+                financiado=F, tarifa_rs=tarifa_rs, seguro_rs=seguro_rs, regime=regime_key,
                 taxa_ef_am=ef_am, taxa_ef_aa=ef_aa,
                 cet_am=cet_am, cet_aa=cet_aa, iof_val=iof_val, liquido=liquido,
                 parcela=PMT)
@@ -292,7 +333,8 @@ if st.button("📊 Calcular taxa", type="primary"):
                        di_atual=di_atual, funding_pct=funding_pct, custo_capital=custo_capital,
                        pis=pis, comissao=comissao, custos_adm=custos_adm, ir_cs=ir_cs,
                        fator_pond=fator_pond, tarifa=tarifa,
-                       seguro=seguro, incluir_iof=incluir_iof, iof_add=iof_add, iof_dia=iof_dia),
+                       seguro=seguro, incluir_iof=incluir_iof, iof_add=iof_add, iof_dia=iof_dia,
+                       regime=regime_key),
     }
 
 if "calc" not in st.session_state:
@@ -304,6 +346,15 @@ else:
         st.error("Não foi possível resolver a taxa com esses parâmetros. Revise as entradas.")
     else:
         st.success("✓ Cálculo realizado")
+        if res["regime"] == "financiado":
+            st.info(f"**Encargos financiados** — o cliente recebe {brl(res['liquido'])} "
+                    f"(o valor pedido) e financia {brl(res['financiado'])} = valor pedido "
+                    f"+ IOF {brl(res['iof_val'])} + tarifa {brl(res['tarifa_rs'])}"
+                    + (f" + seguro {brl(res['seguro_rs'])}" if res["seguro_rs"] > 0 else "")
+                    + ". A exposição de risco (EL, K_IRB) e a parcela usam o valor financiado.")
+        else:
+            st.info(f"**Encargos retidos** — o cliente financia {brl(res['financiado'])} e recebe "
+                    f"{brl(res['liquido'])} líquidos, já descontados IOF, tarifa e seguro.")
         st.markdown("**Taxa nominal (contrato)**")
         n1, n2 = st.columns(2)
         n1.metric("Nominal (% a.a.)", f"{res['taxa_aa']*100:.2f}%")
@@ -336,27 +387,38 @@ Quando **tarifa = comissão**, elas se cancelam em V₀, que volta a se aproxima
                 "Diferença": ["~59 bps", "~9 bps"],
             }))
             st.caption("O resíduo de ~9 bps vem dos custos administrativos (1%) que permanecem em "
-                       "V₀; sem eles, V₀ = EAD e nominal = efetiva.")
+                       "V₀; sem eles, V₀ = EAD e nominal = efetiva. Tabela ilustrativa: R$ 5.000 "
+                       "em 24 meses, encargos retidos e IOF desligado.")
 
         st.markdown("**CET — Custo Efetivo Total (olhar do cliente)**")
         t1, t2 = st.columns(2)
         t1.metric("CET (% a.a.)", f"{res['cet_aa']*100:.2f}%" if np.isfinite(res['cet_aa']) else "—")
         t2.metric("CET (% a.m.)", f"{res['cet_am']*100:.2f}%" if np.isfinite(res['cet_am']) else "—")
-        st.caption(f"CET = TIR sobre o valor líquido recebido pelo cliente "
-                   f"(R$ {res['liquido']:,.2f}) = EAD − tarifa − IOF (R$ {res['iof_val']:,.2f}) − seguro.")
+        if res["regime"] == "financiado":
+            st.caption(f"CET = TIR das parcelas (calculadas sobre o financiado, "
+                       f"{brl(res['financiado'])}) contra o que o cliente recebeu de fato "
+                       f"({brl(res['liquido'])}). O IOF de {brl(res['iof_val'])} e a tarifa "
+                       f"estão embutidos na parcela — por isso o CET fica acima da taxa nominal.")
+        else:
+            st.caption(f"CET = TIR sobre o valor líquido recebido pelo cliente "
+                       f"({brl(res['liquido'])}) = EAD − tarifa − IOF ({brl(res['iof_val'])}) − seguro.")
         st.markdown("**Composição (anual)**")
         st.dataframe(pd.DataFrame({
-            "Componente": ["Funding cost", "Spread EL", "Spread UL", "RAROC alvo",
+            "Componente": ["Valor pedido (liberado)", "Valor financiado (EAD de risco)",
+                           "Funding cost", "Spread EL", "Spread UL", "RAROC alvo",
                            "K_IRB (capital)", "Tarifa (receita orig.)", "Ativo reconhecido (V₀)"],
-            "Valor": [f"{res['funding_cost']*100:.2f}%", f"{res['s_el']*100:.2f}%",
-                      f"{res['s_ul']*100:.2f}%", f"{res['alvo']*100:.2f}%", f"R$ {res['K']:,.2f}",
-                      f"R$ {res['tarifa']*inp['EAD']:,.2f}", f"R$ {res['V0']:,.2f}"],
+            "Valor": [brl(res['liquido']), brl(res['financiado']),
+                      f"{res['funding_cost']*100:.2f}%", f"{res['s_el']*100:.2f}%",
+                      f"{res['s_ul']*100:.2f}%", f"{res['alvo']*100:.2f}%", brl(res['K']),
+                      brl(res['tarifa_rs']), brl(res['V0'])],
         }), hide_index=True)
 
         export = pd.DataFrame([{
             "ID Client": inp["ID"], "Simulation Date": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
             "Methodology": "Consistent",
-            "Loan Amount (EAD)": inp["EAD"], "Term (months)": inp["prazo"], "PD": inp["PD"], "LGD": inp["LGD"],
+            "Requested Amount (R$)": inp["EAD"], "Charges Regime": inp["regime"],
+            "Financed Amount / Risk EAD (R$)": res["financiado"],
+            "Term (months)": inp["prazo"], "PD": inp["PD"], "LGD": inp["LGD"],
             "Funding Rate - Duration (% a.a.)": inp["di_futuro"], "Funding Rate - Risk Free (% a.a.)": inp["di_atual"],
             "Funding Transfer Price (%)": inp["funding_pct"], "Capital Premium (p.p.)": inp["custo_capital"],
             "PIS/COFINS Tax (%)": inp["pis"], "Commission Fee (%)": inp["comissao"], "Admin Costs (%)": inp["custos_adm"],
@@ -384,11 +446,13 @@ Quando **tarifa = comissão**, elas se cancelam em V₀, que volta a se aproxima
         st.caption("Contém apenas o que o banco pode/deve compartilhar com o cliente — "
                    "sem funding, spreads, RAROC, capital, comissão ou taxa efetiva contábil.")
         cliente = pd.DataFrame({
-            "Item": ["Valor da operação (financiado)", "IOF", "Tarifa de cadastro", "Seguro",
-                     "Valor líquido liberado", "Prazo", "Valor da parcela", "Total a pagar",
+            "Item": ["Valor solicitado", "IOF", "Tarifa de cadastro", "Seguro",
+                     "Valor total financiado", "Valor líquido liberado", "Prazo",
+                     "Valor da parcela", "Total a pagar",
                      "Taxa de juros", "Custo Efetivo Total (CET)"],
-            "Valor": [brl(inp["EAD"]), brl(res["iof_val"]), brl(res["tarifa"]*inp["EAD"]),
-                      brl(inp["seguro"]*inp["EAD"]), brl(res["liquido"]), f"{inp['prazo']} meses",
+            "Valor": [brl(inp["EAD"]), brl(res["iof_val"]), brl(res["tarifa_rs"]),
+                      brl(res["seguro_rs"]), brl(res["financiado"]), brl(res["liquido"]),
+                      f"{inp['prazo']} meses",
                       brl(res["parcela"]), brl(res["parcela"]*inp["prazo"]),
                       f"{pct(res['taxa_am'])} a.m. | {pct(res['taxa_aa'])} a.a.",
                       f"{pct(res['cet_am'])} a.m. | {pct(res['cet_aa'])} a.a."],
