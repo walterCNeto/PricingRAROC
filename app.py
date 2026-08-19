@@ -114,6 +114,26 @@ def taxa_efetiva_ifrs9(EAD, PMT, prazo, tarifa, comissao, custos_adm):
         return float("nan"), float("nan"), V0
 
 
+def iof_pf(valor, prazo_meses, aliq_adicional=0.0038, aliq_diaria=0.000082):
+    """IOF pessoa física: adicional fixo + diário (limitado a 365 dias)."""
+    dias = min(prazo_meses * 30, 365)
+    return valor * aliq_adicional + valor * aliq_diaria * dias
+
+
+def calcular_cet(EAD, PMT, prazo, tarifa, seguro, iof_valor):
+    """CET (custo efetivo total, olhar do cliente): TIR que iguala o valor líquido
+    recebido (EAD - tarifa - IOF - seguro) ao fluxo de parcelas que o cliente paga."""
+    liquido = EAD - tarifa * EAD - seguro * EAD - iof_valor
+    if liquido <= 0:
+        return float("nan"), float("nan"), liquido
+    try:
+        r = brentq(lambda x: sum(PMT / (1 + x) ** t for t in range(1, prazo + 1)) - liquido,
+                   1e-9, 2.0, xtol=1e-12)
+        return r, (1 + r) ** 12 - 1, liquido
+    except ValueError:
+        return float("nan"), float("nan"), liquido
+
+
 # ----------------------------------------------------------------------------
 #  INTERFACE
 # ----------------------------------------------------------------------------
@@ -166,6 +186,16 @@ with c4:
     tarifa = st.number_input("Tarifa (fee cobrada, s/ EAD)", 0.0, 0.50, 0.00, 0.01,
                              help="Receita de originação cobrada uma vez sobre o valor liberado. Pode ser 0.")
 
+with st.expander("Encargos ao cliente — para o CET (opcional)"):
+    ec1, ec2, ec3 = st.columns(3)
+    seguro = ec1.number_input("Seguro (s/ EAD)", 0.0, 0.50, 0.00, 0.01,
+                              help="Prêmio de seguro retido na originação. Pode ser 0.")
+    incluir_iof = ec1.checkbox("Incluir IOF (pessoa física)", value=True)
+    iof_add = ec2.number_input("IOF adicional — fixo", 0.0, 0.05, 0.0038, 0.0001, format="%.4f",
+                               help="Alíquota fixa do IOF (padrão PF ≈ 0,38%).")
+    iof_dia = ec3.number_input("IOF diário — por dia (máx 365d)", 0.0, 0.001, 0.000082, 0.000001,
+                               format="%.6f", help="Alíquota diária do IOF (padrão PF ≈ 0,0082%/dia).")
+
 # ---- cálculo (metodologia consistente — embarcada) ----
 def precificar(modo_ul, base_cons, comissao_int):
     rho = calcular_rho(PD, prazo)
@@ -181,16 +211,22 @@ def precificar(modo_ul, base_cons, comissao_int):
                             base_consistente=base_cons, comissao_integral=comissao_int,
                             tarifa=tarifa)
     taxa_am = (1 + taxa_aa) ** (1 / 12) - 1 if np.isfinite(taxa_aa) else float("nan")
-    # taxa efetiva contábil (IFRS 9): amortiza tarifa/comissão/custos pela TIR do fluxo
     if np.isfinite(taxa_am):
         PMT = calculate_pmt(EAD, taxa_am, prazo)
+        # taxa efetiva contábil (IFRS 9): amortiza tarifa/comissão/custos pela TIR
         ef_am, ef_aa, V0 = taxa_efetiva_ifrs9(EAD, PMT, prazo, tarifa, comissao, custos_adm)
+        # CET (olhar do cliente): TIR sobre o líquido recebido, com IOF/tarifa/seguro
+        iof_val = iof_pf(EAD, prazo, iof_add, iof_dia) if incluir_iof else 0.0
+        cet_am, cet_aa, liquido = calcular_cet(EAD, PMT, prazo, tarifa, seguro, iof_val)
     else:
-        ef_am = ef_aa = float("nan")
+        ef_am = ef_aa = cet_am = cet_aa = float("nan")
+        iof_val = 0.0
         V0 = EAD - tarifa * EAD + comissao * EAD + custos_adm * EAD
+        liquido = float("nan")
     return dict(funding_cost=funding_cost, s_el=s_el, s_ul=s_ul, alvo=alvo, K=K,
                 taxa_aa=taxa_aa, taxa_am=taxa_am, tarifa=tarifa, V0=V0,
-                taxa_ef_am=ef_am, taxa_ef_aa=ef_aa)
+                taxa_ef_am=ef_am, taxa_ef_aa=ef_aa,
+                cet_am=cet_am, cet_aa=cet_aa, iof_val=iof_val, liquido=liquido)
 
 # ---- botão calcular + resultado ----
 st.subheader("Resultado")
@@ -201,7 +237,8 @@ if st.button("📊 Calcular taxa", type="primary"):
         "inputs": dict(ID=ID, EAD=EAD, prazo=prazo, PD=PD, LGD=LGD, di_futuro=di_futuro,
                        di_atual=di_atual, funding_pct=funding_pct, custo_capital=custo_capital,
                        pis=pis, comissao=comissao, custos_adm=custos_adm, ir_cs=ir_cs,
-                       fator_pond=fator_pond, tarifa=tarifa),
+                       fator_pond=fator_pond, tarifa=tarifa,
+                       seguro=seguro, incluir_iof=incluir_iof, iof_add=iof_add, iof_dia=iof_dia),
     }
 
 if "calc" not in st.session_state:
@@ -223,6 +260,12 @@ else:
         e2.metric("Efetiva (% a.m.)", f"{res['taxa_ef_am']*100:.2f}%" if np.isfinite(res['taxa_ef_am']) else "—")
         st.caption("A efetiva é a TIR que amortiza tarifa (receita) e comissão/custos de originação "
                    f"ao longo da vida. Ativo reconhecido inicialmente (V₀) = R$ {res['V0']:,.2f}.")
+        st.markdown("**CET — Custo Efetivo Total (olhar do cliente)**")
+        t1, t2 = st.columns(2)
+        t1.metric("CET (% a.a.)", f"{res['cet_aa']*100:.2f}%" if np.isfinite(res['cet_aa']) else "—")
+        t2.metric("CET (% a.m.)", f"{res['cet_am']*100:.2f}%" if np.isfinite(res['cet_am']) else "—")
+        st.caption(f"CET = TIR sobre o valor líquido recebido pelo cliente "
+                   f"(R$ {res['liquido']:,.2f}) = EAD − tarifa − IOF (R$ {res['iof_val']:,.2f}) − seguro.")
         st.markdown("**Composição (anual)**")
         st.dataframe(pd.DataFrame({
             "Componente": ["Funding cost", "Spread EL", "Spread UL", "RAROC alvo",
@@ -240,12 +283,14 @@ else:
             "Funding Transfer Price (%)": inp["funding_pct"], "Capital Premium (p.p.)": inp["custo_capital"],
             "PIS/COFINS Tax (%)": inp["pis"], "Commission Fee (%)": inp["comissao"], "Admin Costs (%)": inp["custos_adm"],
             "IR + CS Tax (%)": inp["ir_cs"], "Risk Weight (FPR)": inp["fator_pond"],
-            "Tarifa (%)": inp["tarifa"],
+            "Tarifa (%)": inp["tarifa"], "Seguro (%)": inp["seguro"],
+            "IOF incluído": inp["incluir_iof"], "IOF (R$)": res["iof_val"],
             "Funding Cost (%)": res["funding_cost"], "Spread EL (%)": res["s_el"],
             "Spread UL (%)": res["s_ul"], "K_IRB (R$)": res["K"],
-            "Accounting Asset V0 (R$)": res["V0"],
+            "Accounting Asset V0 (R$)": res["V0"], "Net Amount to Client (R$)": res["liquido"],
             "Min Interest Rate (a.a.)": res["taxa_aa"], "Min Interest Rate (a.m.)": res["taxa_am"],
             "Effective Rate IFRS9 (a.a.)": res["taxa_ef_aa"], "Effective Rate IFRS9 (a.m.)": res["taxa_ef_am"],
+            "CET (a.a.)": res["cet_aa"], "CET (a.m.)": res["cet_am"],
             "Author": "WalterCN - Banking Financial Engineering - BFEng",
         }])
         buf = io.BytesIO()
