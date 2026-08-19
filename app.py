@@ -134,6 +134,58 @@ def calcular_cet(EAD, PMT, prazo, tarifa, seguro, iof_valor):
         return float("nan"), float("nan"), liquido
 
 
+def brl(x):
+    """Formata em reais no padrão pt-BR (R$ 1.234,56)."""
+    if not np.isfinite(x):
+        return "—"
+    return "R$ " + f"{x:,.2f}".replace(",", "X").replace(".", ",").replace("X", ".")
+
+
+def pct(x):
+    """Formata taxa em % pt-BR (2,16%)."""
+    if not np.isfinite(x):
+        return "—"
+    return f"{x*100:.2f}".replace(".", ",") + "%"
+
+
+def gerar_demonstrativo(ID, res, EAD, prazo, seguro):
+    """Documento voltado ao CLIENTE — apenas o que o banco pode/deve divulgar.
+    NÃO inclui funding, spreads, RAROC, K_IRB, comissão, PD/LGD ou taxa efetiva IFRS 9."""
+    tarifa_rs = res["tarifa"] * EAD
+    seguro_rs = seguro * EAD
+    total = res["parcela"] * prazo if np.isfinite(res["parcela"]) else float("nan")
+    L = []
+    L.append("DEMONSTRATIVO DE CUSTO EFETIVO TOTAL (CET)")
+    L.append("Operação de Crédito")
+    L.append("=" * 52)
+    L.append(f"Cliente (ID) : {ID or '-'}")
+    L.append(f"Data         : {datetime.now().strftime('%d/%m/%Y %H:%M')}")
+    L.append("")
+    L.append("VALORES")
+    L.append(f"  Valor da operação (financiado) ... {brl(EAD)}")
+    L.append(f"  IOF .............................. {brl(res['iof_val'])}")
+    L.append(f"  Tarifa de cadastro ............... {brl(tarifa_rs)}")
+    L.append(f"  Seguro ........................... {brl(seguro_rs)}")
+    L.append(f"  Valor líquido liberado ao cliente  {brl(res['liquido'])}")
+    L.append("")
+    L.append("CONDIÇÕES DE PAGAMENTO")
+    L.append(f"  Prazo ............................ {prazo} meses")
+    L.append(f"  Sistema de amortização ........... Price (parcelas fixas)")
+    L.append(f"  Valor da parcela ................. {brl(res['parcela'])}")
+    L.append(f"  Total a pagar .................... {brl(total)}")
+    L.append("")
+    L.append("TAXAS")
+    L.append(f"  Taxa de juros .................... {pct(res['taxa_am'])} a.m.  |  {pct(res['taxa_aa'])} a.a.")
+    L.append(f"  Custo Efetivo Total (CET) ........ {pct(res['cet_am'])} a.m.  |  {pct(res['cet_aa'])} a.a.")
+    L.append("")
+    L.append("-" * 52)
+    L.append("O Custo Efetivo Total (CET) representa o custo total da")
+    L.append("operação, expresso em taxa percentual, conforme a")
+    L.append("Resolução CMN nº 4.881. Inclui juros, tributos (IOF),")
+    L.append("tarifas e demais encargos incidentes sobre o crédito.")
+    return "\n".join(L)
+
+
 # ----------------------------------------------------------------------------
 #  INTERFACE
 # ----------------------------------------------------------------------------
@@ -223,10 +275,12 @@ def precificar(modo_ul, base_cons, comissao_int):
         iof_val = 0.0
         V0 = EAD - tarifa * EAD + comissao * EAD + custos_adm * EAD
         liquido = float("nan")
+        PMT = float("nan")
     return dict(funding_cost=funding_cost, s_el=s_el, s_ul=s_ul, alvo=alvo, K=K,
                 taxa_aa=taxa_aa, taxa_am=taxa_am, tarifa=tarifa, V0=V0,
                 taxa_ef_am=ef_am, taxa_ef_aa=ef_aa,
-                cet_am=cet_am, cet_aa=cet_aa, iof_val=iof_val, liquido=liquido)
+                cet_am=cet_am, cet_aa=cet_aa, iof_val=iof_val, liquido=liquido,
+                parcela=PMT)
 
 # ---- botão calcular + resultado ----
 st.subheader("Resultado")
@@ -323,6 +377,27 @@ Quando **tarifa = comissão**, elas se cancelam em V₀, que volta a se aproxima
         st.download_button("⬇️ Baixar Excel", buf.getvalue(),
                            file_name=f"Simulation_{datetime.now():%Y-%m-%d}_BFEng.xlsx",
                            mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet")
+
+        # ---- Documento para o cliente (apenas dados divulgáveis) ----
+        st.divider()
+        st.subheader("📄 Demonstrativo ao cliente (contrato)")
+        st.caption("Contém apenas o que o banco pode/deve compartilhar com o cliente — "
+                   "sem funding, spreads, RAROC, capital, comissão ou taxa efetiva contábil.")
+        cliente = pd.DataFrame({
+            "Item": ["Valor da operação (financiado)", "IOF", "Tarifa de cadastro", "Seguro",
+                     "Valor líquido liberado", "Prazo", "Valor da parcela", "Total a pagar",
+                     "Taxa de juros", "Custo Efetivo Total (CET)"],
+            "Valor": [brl(inp["EAD"]), brl(res["iof_val"]), brl(res["tarifa"]*inp["EAD"]),
+                      brl(inp["seguro"]*inp["EAD"]), brl(res["liquido"]), f"{inp['prazo']} meses",
+                      brl(res["parcela"]), brl(res["parcela"]*inp["prazo"]),
+                      f"{pct(res['taxa_am'])} a.m. | {pct(res['taxa_aa'])} a.a.",
+                      f"{pct(res['cet_am'])} a.m. | {pct(res['cet_aa'])} a.a."],
+        })
+        st.table(cliente)
+        doc = gerar_demonstrativo(inp["ID"], res, inp["EAD"], inp["prazo"], inp["seguro"])
+        st.download_button("⬇️ Baixar demonstrativo do cliente (.txt)", doc.encode("utf-8"),
+                           file_name=f"Demonstrativo_CET_{datetime.now():%Y-%m-%d}.txt",
+                           mime="text/plain")
 
 st.markdown(
     '<div class="foot">paper: '
