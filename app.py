@@ -7,7 +7,10 @@ Roda de graça no Streamlit Community Cloud.  Arquivo único, sem banco de dados
 Metodologia embarcada = "Consistente" (correções de validação):
   (1) spread UL apenas sobre o prêmio de capital;
   (2) base temporal anual = anual (sem o fator n/12 no alvo);
-  (3) comissão/custos integrais (one-time), sem o fator 12/n.
+  (3) comissão/custos integrais (one-time), sem o fator 12/n;
+  (4) V0 da TJEO capitaliza apenas custos incrementais e diretamente atribuiveis
+      (CMN 4.966, art. 2, XXII); custos de estrutura ficam fora do valor contabil
+      bruto e entram somente na precificacao (RAROC).
 """
 
 import io
@@ -102,10 +105,19 @@ def otimizar_taxa(EAD, LGD, PD, rho, funding_cost, prazo, alvo_anual,
         return float("nan")
 
 
-def taxa_efetiva_ifrs9(EAD, PMT, prazo, tarifa, comissao, custos_adm):
-    """TIR mensal que amortiza custos/receitas de originação (custo amortizado IFRS 9).
-    V0 = EAD - tarifa + comissão + custos  (ativo reconhecido inicialmente)."""
-    V0 = EAD - tarifa * EAD + comissao * EAD + custos_adm * EAD
+def calcular_tjeo(base, PMT, prazo, tarifa_rs, comissao_rs, custos_orig_rs):
+    """TJEO — taxa de juros efetiva original (CMN 4.966, art. 2º, XXII).
+
+    Taxa que equaliza o valor presente de todos os recebimentos e pagamentos ao
+    longo do prazo contratual ao VALOR CONTÁBIL BRUTO do ativo no reconhecimento
+    inicial:  V₀ = base − tarifa recebida + comissão paga + custos de originação.
+
+    Só entram custos INCREMENTAIS e DIRETAMENTE ATRIBUÍVEIS à originação
+    (comissão ao correspondente, averbação, registro de garantia, análise
+    terceirizada).  Despesas administrativas de estrutura NÃO são capitalizáveis
+    e não entram aqui — são insumo de precificação (RAROC), não de mensuração.
+    """
+    V0 = base - tarifa_rs + comissao_rs + custos_orig_rs
     try:
         r = brentq(lambda x: sum(PMT / (1 + x) ** t for t in range(1, prazo + 1)) - V0,
                    1e-9, 1.0, xtol=1e-12)
@@ -299,12 +311,21 @@ with c3:
     di_atual = st.number_input("Funding Rate – Risk Free (% a.a.)", 0.1, 50.0, 11.70, 0.01)
     funding_pct = st.number_input("Funding Transfer Price Factor (%)", 100.0, 500.0, 128.0, 10.0)
     custo_capital = st.number_input("Capital Premium (p.p.)", 0.0, 15.0, 5.0, 0.5)
-    custos_adm = st.number_input("Admin Costs", 0.0, 0.50, 0.01, 0.01)
+    custos_orig = st.number_input("Custos de originação — capitalizáveis", 0.0, 0.50, 0.00, 0.005,
+                                  format="%.3f",
+                                  help="Custos INCREMENTAIS e diretamente atribuíveis à originação "
+                                       "(averbação, registro, análise terceirizada). Entram no V₀ "
+                                       "da TJEO e no RAROC.")
 with c4:
     fator_pond = st.number_input("Risk Weighting (FPR)", 0.0, 0.99, 0.50, 0.01)
     ir_cs = st.number_input("IR/CS Tax", 0.0, 0.80, 0.40, 0.01)
     tarifa = st.number_input("Tarifa (fee cobrada, s/ EAD)", 0.0, 0.50, 0.00, 0.01,
                              help="Receita de originação cobrada uma vez sobre o valor liberado. Pode ser 0.")
+    custos_estrut = st.number_input("Custos administrativos — estrutura", 0.0, 0.50, 0.01, 0.005,
+                                    format="%.3f",
+                                    help="Rateio de estrutura/overhead. NÃO é capitalizável sob a "
+                                         "CMN 4.966 — entra só no RAROC, fora do V₀ da TJEO.")
+custos_adm = custos_orig + custos_estrut     # despesa total: base do RAROC
 
 with st.expander("Encargos ao cliente — regime, IOF e seguro"):
     regime = st.radio(
@@ -347,16 +368,19 @@ def precificar(modo_ul, base_cons, comissao_int):
     if np.isfinite(taxa_am):
         # 3) parcela sobre o financiado (IOF/tarifa/seguro diluídos, no regime financiado)
         PMT = calculate_pmt(F, taxa_am, prazo)
-        # taxa efetiva contábil (IFRS 9): amortiza tarifa/comissão/custos pela TIR
-        ef_am, ef_aa, V0 = taxa_efetiva_ifrs9(F, PMT, prazo, tarifa_ratio, comissao, custos_adm)
+        # TJEO (CMN 4.966): só custos capitalizáveis entram no valor contábil bruto
+        ef_am, ef_aa, V0 = calcular_tjeo(F, PMT, prazo, tarifa_rs,
+                                         comissao * F, custos_orig * F)
         # CET (olhar do cliente): TIR das parcelas contra o que ele recebeu de fato
         cet_am, cet_aa = calcular_cet(PMT, prazo, liquido)
     else:
         ef_am = ef_aa = cet_am = cet_aa = float("nan")
-        V0 = F - tarifa_rs + comissao * F + custos_adm * F
+        V0 = F - tarifa_rs + comissao * F + custos_orig * F
         PMT = float("nan")
     return dict(funding_cost=funding_cost, s_el=s_el, s_ul=s_ul, alvo=alvo, K=K,
                 taxa_aa=taxa_aa, taxa_am=taxa_am, tarifa=tarifa, V0=V0,
+                custos_orig_rs=custos_orig * F, custos_estrut_rs=custos_estrut * F,
+                comissao_rs=comissao * F,
                 financiado=F, tarifa_rs=tarifa_rs, seguro_rs=seguro_rs, regime=regime_key,
                 taxa_ef_am=ef_am, taxa_ef_aa=ef_aa,
                 cet_am=cet_am, cet_aa=cet_aa, iof_val=iof_val, liquido=liquido,
@@ -370,7 +394,8 @@ if st.button("📊 Calcular taxa", type="primary"):
         "res": precificar("premio", True, True),
         "inputs": dict(ID=ID, EAD=EAD, prazo=prazo, PD=PD, LGD=LGD, di_futuro=di_futuro,
                        di_atual=di_atual, funding_pct=funding_pct, custo_capital=custo_capital,
-                       pis=pis, comissao=comissao, custos_adm=custos_adm, ir_cs=ir_cs,
+                       pis=pis, comissao=comissao, custos_orig=custos_orig,
+                       custos_estrut=custos_estrut, ir_cs=ir_cs,
                        fator_pond=fator_pond, tarifa=tarifa,
                        seguro=seguro, incluir_iof=incluir_iof, iof_add=iof_add, iof_dia=iof_dia,
                        regime=regime_key),
@@ -398,36 +423,43 @@ else:
         n1, n2 = st.columns(2)
         n1.metric("Nominal (% a.a.)", f"{res['taxa_aa']*100:.2f}%")
         n2.metric("Nominal (% a.m.)", f"{res['taxa_am']*100:.2f}%")
-        st.markdown("**Taxa efetiva contábil — IFRS 9 / CMN 4.966**")
+        st.markdown("**TJEO — Taxa de Juros Efetiva Original (CMN 4.966)**")
         e1, e2 = st.columns(2)
-        e1.metric("Efetiva (% a.a.)", f"{res['taxa_ef_aa']*100:.2f}%" if np.isfinite(res['taxa_ef_aa']) else "—")
-        e2.metric("Efetiva (% a.m.)", f"{res['taxa_ef_am']*100:.2f}%" if np.isfinite(res['taxa_ef_am']) else "—")
-        st.caption("A efetiva é a TIR que amortiza tarifa (receita) e comissão/custos de originação "
-                   f"ao longo da vida. Ativo reconhecido inicialmente (V₀) = R$ {res['V0']:,.2f}.")
+        e1.metric("TJEO (% a.a.)", f"{res['taxa_ef_aa']*100:.2f}%" if np.isfinite(res['taxa_ef_aa']) else "—")
+        e2.metric("TJEO (% a.m.)", f"{res['taxa_ef_am']*100:.2f}%" if np.isfinite(res['taxa_ef_am']) else "—")
+        st.caption("Taxa que equaliza o valor presente dos recebimentos e pagamentos do contrato ao "
+                   f"**valor contábil bruto** no reconhecimento inicial: V₀ = {brl(res['V0'])} = "
+                   f"financiado {brl(res['financiado'])} − tarifa {brl(res['tarifa_rs'])} + comissão "
+                   f"{brl(res['comissao_rs'])} + custos de originação {brl(res['custos_orig_rs'])}. "
+                   f"Custos de estrutura ({brl(res['custos_estrut_rs'])}) ficam de fora — não são "
+                   "capitalizáveis.")
 
-        with st.expander("ℹ️ Por que a taxa nominal difere da efetiva (IFRS 9)?"):
+        with st.expander("ℹ️ Por que a taxa nominal difere da TJEO?"):
             st.markdown(
-"""A taxa **nominal** e a **efetiva (IFRS 9 / CMN 4.966)** usam o **mesmo fluxo de parcelas** — o que muda é a **base** contra a qual esse fluxo é medido, não o regime de tempo:
+"""A taxa **nominal** e a **TJEO** usam o **mesmo fluxo de parcelas** — o que muda é a **base** contra a qual esse fluxo é medido, não o regime de tempo:
 
-- **Nominal** = TIR das parcelas contra o **valor de face** (EAD contratado).
-- **Efetiva** = TIR das mesmas parcelas contra o **valor contábil inicial** do ativo: **V₀ = EAD − tarifa + comissão + custos de originação**.
+- **Nominal** = TIR das parcelas contra o **valor de face** (valor financiado).
+- **TJEO** = TIR das mesmas parcelas contra o **valor contábil bruto** inicial: **V₀ = financiado − tarifa + comissão + custos de originação**.
 
-A comissão (despesa) *aumenta* V₀ → a efetiva fica **abaixo** da nominal. A tarifa (receita) *reduz* V₀ → a efetiva **sobe**. A diferença é o **efeito líquido dos ajustes de originação** embutidos em V₀ — e não uma questão de caixa vs. competência.
+A comissão e os custos de originação (despesas) *aumentam* V₀ → a TJEO fica **abaixo** da nominal. A tarifa (receita) *reduz* V₀ → a TJEO **sobe**. A diferença é o **efeito líquido dos ajustes de originação** embutidos em V₀ — e não uma questão de caixa vs. competência.
 
-Quando **tarifa = comissão**, elas se cancelam em V₀, que volta a se aproximar do EAD, e a efetiva **converge** para a nominal. Zerando também os custos de originação, V₀ = EAD e as duas taxas ficam **idênticas**.""")
-            st.caption(f"Nesta operação: nominal {res['taxa_am']*100:.3f}% a.m. · efetiva "
-                       f"{res['taxa_ef_am']*100:.3f}% a.m. · V₀ = R$ {res['V0']:,.2f} · "
+**O que entra em V₀ é matéria de classificação, não de calibragem.** Só custos **incrementais e diretamente atribuíveis** são capitalizáveis (comissão ao correspondente, averbação, registro, análise terceirizada). Rateio de estrutura e overhead **não** entram — permanecem como despesa do período e afetam apenas a precificação (RAROC). Incluí-los indevidamente infla o ativo e **subestima** a TJEO de forma sistemática.
+
+Quando os ajustes de originação se anulam em V₀, a TJEO **converge** para a nominal. Atenção à base: a tarifa incide sobre o **valor pedido** e a comissão sobre o **valor financiado** — com percentuais iguais elas não se cancelam exatamente, e sobra um resíduo proporcional aos encargos financiados.
+
+O efeito é **inversamente proporcional ao prazo**: o mesmo custo de originação, diluído em poucas parcelas, desloca a taxa mensal muito mais do que em prazos longos.""")
+            st.caption(f"Nesta operação: nominal {res['taxa_am']*100:.3f}% a.m. · TJEO "
+                       f"{res['taxa_ef_am']*100:.3f}% a.m. · V₀ = {brl(res['V0'])} · "
                        f"diferença ≈ {(res['taxa_am']-res['taxa_ef_am'])*1e4:.0f} bps.")
             st.table(pd.DataFrame({
-                "Cenário (comissão 6%)": ["Tarifa 0%", "Tarifa 6% (= comissão)"],
-                "Nominal a.m.": ["2,160%", "1,720%"],
-                "Efetiva a.m.": ["1,567%", "1,634%"],
-                "V₀": ["R$ 5.350", "R$ 5.050"],
-                "Diferença": ["~59 bps", "~9 bps"],
+                "Prazo (custo de originação = 2% do principal)": ["2 meses", "6 meses", "12 meses",
+                                                                   "24 meses", "48 meses"],
+                "Deslocamento da TJEO": ["−137 bps a.m.", "−60 bps a.m.", "−34 bps a.m.",
+                                          "−19 bps a.m.", "−12 bps a.m."],
             }))
-            st.caption("O resíduo de ~9 bps vem dos custos administrativos (1%) que permanecem em "
-                       "V₀; sem eles, V₀ = EAD e nominal = efetiva. Tabela ilustrativa: R$ 5.000 "
-                       "em 24 meses, encargos retidos e IOF desligado.")
+            st.caption("Tabela ilustrativa do efeito-prazo: um custo de originação de 2% do "
+                       "principal derruba a TJEO em 137 bps num contrato de 2 meses e em apenas "
+                       "12 bps num de 48 — por isso o ajuste nunca é 'ligeiro' por definição.")
 
         st.markdown("**CET — Custo Efetivo Total (olhar do cliente)**")
         t1, t2 = st.columns(2)
@@ -462,11 +494,15 @@ Quando **tarifa = comissão**, elas se cancelam em V₀, que volta a se aproxima
         st.dataframe(pd.DataFrame({
             "Componente": ["Valor pedido (liberado)", "Valor financiado (EAD de risco)",
                            "Funding cost", "Spread EL", "Spread UL", "RAROC alvo",
-                           "K_IRB (capital)", "Tarifa (receita orig.)", "Ativo reconhecido (V₀)"],
+                           "K_IRB (capital)", "Tarifa (receita orig.)", "Comissão (despesa orig.)",
+                           "Custos de originação (capitalizáveis)",
+                           "Custos de estrutura (não capitalizáveis)",
+                           "Valor contábil bruto (V₀)"],
             "Valor": [brl(res['liquido']), brl(res['financiado']),
                       f"{res['funding_cost']*100:.2f}%", f"{res['s_el']*100:.2f}%",
                       f"{res['s_ul']*100:.2f}%", f"{res['alvo']*100:.2f}%", brl(res['K']),
-                      brl(res['tarifa_rs']), brl(res['V0'])],
+                      brl(res['tarifa_rs']), brl(res['comissao_rs']),
+                      brl(res['custos_orig_rs']), brl(res['custos_estrut_rs']), brl(res['V0'])],
         }), hide_index=True)
 
         export = pd.DataFrame([{
@@ -477,15 +513,18 @@ Quando **tarifa = comissão**, elas se cancelam em V₀, que volta a se aproxima
             "Term (months)": inp["prazo"], "PD": inp["PD"], "LGD": inp["LGD"],
             "Funding Rate - Duration (% a.a.)": inp["di_futuro"], "Funding Rate - Risk Free (% a.a.)": inp["di_atual"],
             "Funding Transfer Price (%)": inp["funding_pct"], "Capital Premium (p.p.)": inp["custo_capital"],
-            "PIS/COFINS Tax (%)": inp["pis"], "Commission Fee (%)": inp["comissao"], "Admin Costs (%)": inp["custos_adm"],
+            "PIS/COFINS Tax (%)": inp["pis"], "Commission Fee (%)": inp["comissao"], 
             "IR + CS Tax (%)": inp["ir_cs"], "Risk Weight (FPR)": inp["fator_pond"],
+            "Origination Costs - capitalizable (%)": inp["custos_orig"],
+            "Structural Admin Costs - not capitalizable (%)": inp["custos_estrut"],
             "Tarifa (%)": inp["tarifa"], "Seguro (%)": inp["seguro"],
             "IOF incluído": inp["incluir_iof"], "IOF (R$)": res["iof_val"],
             "Funding Cost (%)": res["funding_cost"], "Spread EL (%)": res["s_el"],
             "Spread UL (%)": res["s_ul"], "K_IRB (R$)": res["K"],
-            "Accounting Asset V0 (R$)": res["V0"], "Net Amount to Client (R$)": res["liquido"],
+            "Gross Carrying Amount V0 (R$)": res["V0"], "Net Amount to Client (R$)": res["liquido"],
             "Min Interest Rate (a.a.)": res["taxa_aa"], "Min Interest Rate (a.m.)": res["taxa_am"],
-            "Effective Rate IFRS9 (a.a.)": res["taxa_ef_aa"], "Effective Rate IFRS9 (a.m.)": res["taxa_ef_am"],
+            "TJEO - Original Effective Rate (a.a.)": res["taxa_ef_aa"],
+            "TJEO - Original Effective Rate (a.m.)": res["taxa_ef_am"],
             "CET (a.a.)": res["cet_aa"], "CET (a.m.)": res["cet_am"],
             "Author": "WalterCN - Banking Financial Engineering - BFEng",
         }])
@@ -500,7 +539,7 @@ Quando **tarifa = comissão**, elas se cancelam em V₀, que volta a se aproxima
         st.divider()
         st.subheader("📄 Demonstrativo ao cliente (contrato)")
         st.caption("Contém apenas o que o banco pode/deve compartilhar com o cliente — "
-                   "sem funding, spreads, RAROC, capital, comissão ou taxa efetiva contábil.")
+                   "sem funding, spreads, RAROC, capital, comissão ou TJEO.")
         cliente = pd.DataFrame({
             "Item": ["Valor solicitado", "IOF", "Tarifa de cadastro", "Seguro",
                      "Valor total financiado", "Valor líquido liberado", "Prazo",
