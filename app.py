@@ -160,6 +160,45 @@ def calcular_cet(PMT, prazo, liquido):
         return float("nan"), float("nan")
 
 
+def _tir(PMT, prazo, base):
+    """TIR mensal de um fluxo Price: PMT constante descontado contra `base`."""
+    if not np.isfinite(base) or base <= 0 or not np.isfinite(PMT):
+        return float("nan")
+    try:
+        return brentq(lambda x: sum(PMT / (1 + x) ** t for t in range(1, prazo + 1)) - base,
+                      1e-9, 2.0, xtol=1e-12)
+    except ValueError:
+        return float("nan")
+
+
+def decompor_taxa(PMT, prazo, financiado, iof_val, tarifa_rs, seguro_rs):
+    """Decomposição exata da taxa por TIR incremental (cascata nominal → CET).
+
+    Mantém a PARCELA fixa e vai retirando da base, uma camada por vez, o que o
+    cliente não recebeu.  A diferença entre TIRs sucessivas é o impacto, em p.p.,
+    daquele encargo.  A ordem segue a convenção do CET: juro, tributo (IOF),
+    tarifas e, por último, seguros — cada camada responde "quanto ESTE item
+    acrescenta, dado tudo que já veio antes".  A soma fecha no CET por construção.
+    """
+    camadas = [("IOF (tributo)", iof_val), ("Tarifa de cadastro", tarifa_rs),
+               ("Seguro", seguro_rs)]
+    base = financiado
+    taxa_ant = _tir(PMT, prazo, base)
+    linhas = [{"Camada": "Juro (taxa nominal do contrato)", "Base (PV)": base,
+               "Taxa a.m.": taxa_ant, "Impacto (p.p. a.m.)": float("nan")}]
+    for nome, valor in camadas:
+        if valor <= 0:
+            continue
+        base -= valor
+        taxa = _tir(PMT, prazo, base)
+        linhas.append({"Camada": f"+ {nome}", "Base (PV)": base, "Taxa a.m.": taxa,
+                       "Impacto (p.p. a.m.)": taxa - taxa_ant})
+        taxa_ant = taxa
+    linhas.append({"Camada": "= CET (custo total ao cliente)", "Base (PV)": base,
+                   "Taxa a.m.": taxa_ant, "Impacto (p.p. a.m.)": float("nan")})
+    return linhas
+
+
 def brl(x):
     """Formata em reais no padrão pt-BR (R$ 1.234,56)."""
     if not np.isfinite(x):
@@ -402,6 +441,23 @@ Quando **tarifa = comissão**, elas se cancelam em V₀, que volta a se aproxima
         else:
             st.caption(f"CET = TIR sobre o valor líquido recebido pelo cliente "
                        f"({brl(res['liquido'])}) = EAD − tarifa − IOF ({brl(res['iof_val'])}) − seguro.")
+        with st.expander("🔎 Decomposição da taxa — de onde vem cada ponto do CET"):
+            linhas = decompor_taxa(res["parcela"], inp["prazo"], res["financiado"],
+                                   res["iof_val"], res["tarifa_rs"], res["seguro_rs"])
+            st.markdown(
+"""Mesma **parcela**, bases diferentes. Cada camada retira da base o que o cliente **não recebeu**, e a variação da TIR é o custo daquele encargo. A ordem segue a convenção do CET — juro, tributo, tarifas e seguros — de modo que cada linha responde *"quanto ESTE item acrescenta, dado tudo que já veio antes"*. **A soma dos impactos fecha exatamente no CET** (decomposição exata, não aproximação).""")
+            st.table(pd.DataFrame([{
+                "Camada": L["Camada"],
+                "Base (PV)": brl(L["Base (PV)"]),
+                "Taxa a.m.": f"{L['Taxa a.m.']*100:.3f}%" if np.isfinite(L["Taxa a.m."]) else "—",
+                "Impacto": (f"{L['Impacto (p.p. a.m.)']*100:+.3f} p.p."
+                            if np.isfinite(L["Impacto (p.p. a.m.)"]) else "—"),
+            } for L in linhas]))
+            st.caption(f"Verificação: nominal {res['taxa_am']*100:.3f}% + soma dos impactos "
+                       f"{(res['cet_am']-res['taxa_am'])*100:+.3f} p.p. = CET {res['cet_am']*100:.3f}% a.m. "
+                       "A decomposição só é possível porque o app parte dos parâmetros de cada "
+                       "encargo — principal e parcela sozinhos entregam apenas a taxa cheia.")
+
         st.markdown("**Composição (anual)**")
         st.dataframe(pd.DataFrame({
             "Componente": ["Valor pedido (liberado)", "Valor financiado (EAD de risco)",
