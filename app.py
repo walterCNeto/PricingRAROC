@@ -306,7 +306,9 @@ with c2:
     prazo = st.select_slider("Loan Term (months)", options=list(range(12, 61, 6)), value=24)
     LGD = st.number_input("LGD", 0.10, 0.99, 0.75, 0.05)
     di_futuro = st.number_input("Funding Rate – Duration (% a.a.)", 0.1, 50.0, 12.99, 0.01)
-    comissao = st.number_input("Fee (comissão)", 0.0, 0.50, 0.06, 0.01)
+    comissao = st.number_input("Comissão ao correspondente (s/ valor liberado)", 0.0, 0.50, 0.06, 0.01,
+                               help="Incide sobre o valor LIBERADO ao cliente, não sobre o financiado: "
+                                    "não se paga comissão sobre IOF, que é tributo apenas repassado.")
 with c3:
     di_atual = st.number_input("Funding Rate – Risk Free (% a.a.)", 0.1, 50.0, 11.70, 0.01)
     funding_pct = st.number_input("Funding Transfer Price Factor (%)", 100.0, 500.0, 128.0, 10.0)
@@ -352,6 +354,10 @@ def precificar(modo_ul, base_cons, comissao_int):
 
     # 2) risco e precificação rodam sobre o valor FINANCIADO (a exposição do banco)
     tarifa_ratio = tarifa_rs / F                  # tarifa em R$ fixo, expressa s/ o financiado
+    # comissão ao correspondente incide sobre o VALOR LIBERADO ao cliente: não se paga
+    # comissão sobre IOF (tributo apenas repassado à Receita, não é crédito originado)
+    comissao_rs = comissao * liquido
+    comissao_ratio = comissao_rs / F              # idem, expressa s/ o financiado p/ o RAROC
     rho = calcular_rho(PD, prazo)
     funding_cost = (di_futuro / 100) * (funding_pct / 100)
     premio = custo_capital / 100
@@ -361,7 +367,7 @@ def precificar(modo_ul, base_cons, comissao_int):
     alvo = funding_cost + s_el + s_ul
     K = calculate_IRB_capital(F, LGD, PD, rho, prazo)
     taxa_aa = otimizar_taxa(F, LGD, PD, rho, funding_cost, prazo, alvo,
-                            pis, comissao, custos_adm, ir_cs, fator_pond, di_atual / 100,
+                            pis, comissao_ratio, custos_adm, ir_cs, fator_pond, di_atual / 100,
                             base_consistente=base_cons, comissao_integral=comissao_int,
                             tarifa=tarifa_ratio)
     taxa_am = (1 + taxa_aa) ** (1 / 12) - 1 if np.isfinite(taxa_aa) else float("nan")
@@ -370,17 +376,17 @@ def precificar(modo_ul, base_cons, comissao_int):
         PMT = calculate_pmt(F, taxa_am, prazo)
         # TJEO (CMN 4.966): só custos capitalizáveis entram no valor contábil bruto
         ef_am, ef_aa, V0 = calcular_tjeo(F, PMT, prazo, tarifa_rs,
-                                         comissao * F, custos_orig * F)
+                                         comissao_rs, custos_orig * F)
         # CET (olhar do cliente): TIR das parcelas contra o que ele recebeu de fato
         cet_am, cet_aa = calcular_cet(PMT, prazo, liquido)
     else:
         ef_am = ef_aa = cet_am = cet_aa = float("nan")
-        V0 = F - tarifa_rs + comissao * F + custos_orig * F
+        V0 = F - tarifa_rs + comissao_rs + custos_orig * F
         PMT = float("nan")
     return dict(funding_cost=funding_cost, s_el=s_el, s_ul=s_ul, alvo=alvo, K=K,
                 taxa_aa=taxa_aa, taxa_am=taxa_am, tarifa=tarifa, V0=V0,
                 custos_orig_rs=custos_orig * F, custos_estrut_rs=custos_estrut * F,
-                comissao_rs=comissao * F,
+                comissao_rs=comissao_rs,
                 financiado=F, tarifa_rs=tarifa_rs, seguro_rs=seguro_rs, regime=regime_key,
                 taxa_ef_am=ef_am, taxa_ef_aa=ef_aa,
                 cet_am=cet_am, cet_aa=cet_aa, iof_val=iof_val, liquido=liquido,
@@ -445,7 +451,7 @@ A comissão e os custos de originação (despesas) *aumentam* V₀ → a TJEO fi
 
 **O que entra em V₀ é matéria de classificação, não de calibragem.** Só custos **incrementais e diretamente atribuíveis** são capitalizáveis (comissão ao correspondente, averbação, registro, análise terceirizada). Rateio de estrutura e overhead **não** entram — permanecem como despesa do período e afetam apenas a precificação (RAROC). Incluí-los indevidamente infla o ativo e **subestima** a TJEO de forma sistemática.
 
-Quando os ajustes de originação se anulam em V₀, a TJEO **converge** para a nominal. Atenção à base: a tarifa incide sobre o **valor pedido** e a comissão sobre o **valor financiado** — com percentuais iguais elas não se cancelam exatamente, e sobra um resíduo proporcional aos encargos financiados.
+Quando os ajustes de originação se anulam em V₀, a TJEO **converge** para a nominal. Como a tarifa e a comissão incidem sobre a **mesma base** — o valor liberado ao cliente —, percentuais iguais se cancelam exatamente e as duas taxas ficam idênticas (desde que não haja custos capitalizáveis). A comissão não incide sobre o valor financiado porque não se paga correspondente sobre IOF, que é tributo repassado à Receita, não crédito originado.
 
 O efeito é **inversamente proporcional ao prazo**: o mesmo custo de originação, diluído em poucas parcelas, desloca a taxa mensal muito mais do que em prazos longos.""")
             st.caption(f"Nesta operação: nominal {res['taxa_am']*100:.3f}% a.m. · TJEO "
@@ -494,7 +500,7 @@ O efeito é **inversamente proporcional ao prazo**: o mesmo custo de originaçã
         st.dataframe(pd.DataFrame({
             "Componente": ["Valor pedido (liberado)", "Valor financiado (EAD de risco)",
                            "Funding cost", "Spread EL", "Spread UL", "RAROC alvo",
-                           "K_IRB (capital)", "Tarifa (receita orig.)", "Comissão (despesa orig.)",
+                           "K_IRB (capital)", "Tarifa (receita orig.)", "Comissão (s/ valor liberado)",
                            "Custos de originação (capitalizáveis)",
                            "Custos de estrutura (não capitalizáveis)",
                            "Valor contábil bruto (V₀)"],
@@ -513,7 +519,7 @@ O efeito é **inversamente proporcional ao prazo**: o mesmo custo de originaçã
             "Term (months)": inp["prazo"], "PD": inp["PD"], "LGD": inp["LGD"],
             "Funding Rate - Duration (% a.a.)": inp["di_futuro"], "Funding Rate - Risk Free (% a.a.)": inp["di_atual"],
             "Funding Transfer Price (%)": inp["funding_pct"], "Capital Premium (p.p.)": inp["custo_capital"],
-            "PIS/COFINS Tax (%)": inp["pis"], "Commission Fee (%)": inp["comissao"], 
+            "PIS/COFINS Tax (%)": inp["pis"], "Commission on Disbursed Amount (%)": inp["comissao"], 
             "IR + CS Tax (%)": inp["ir_cs"], "Risk Weight (FPR)": inp["fator_pond"],
             "Origination Costs - capitalizable (%)": inp["custos_orig"],
             "Structural Admin Costs - not capitalizable (%)": inp["custos_estrut"],
