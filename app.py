@@ -465,7 +465,7 @@ O efeito é **inversamente proporcional ao prazo**: o mesmo custo de originaçã
             }))
             st.caption("Tabela ilustrativa do efeito-prazo: um custo de originação de 2% do "
                        "principal derruba a TJEO em 137 bps num contrato de 2 meses e em apenas "
-                       "12 bps num de 48 — por isso o ajuste nunca é 'ligeiro' por definição.")
+                       "12 bps num de 48.")
 
         st.markdown("**CET — Custo Efetivo Total (olhar do cliente)**")
         t1, t2 = st.columns(2)
