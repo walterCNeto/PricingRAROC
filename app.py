@@ -306,7 +306,7 @@ with c2:
     prazo = st.select_slider("Loan Term (months)", options=list(range(12, 61, 6)), value=24)
     LGD = st.number_input("LGD", 0.10, 0.99, 0.75, 0.05)
     di_futuro = st.number_input("Funding Rate – Duration (% a.a.)", 0.1, 50.0, 12.99, 0.01)
-    comissao = st.number_input("Comissão ao correspondente (s/ valor liberado)", 0.0, 0.50, 0.06, 0.01,
+    comissao = st.number_input("Comissão CORBAN", 0.0, 0.50, 0.06, 0.01,
                                help="Incide sobre o valor LIBERADO ao cliente, não sobre o financiado: "
                                     "não se paga comissão sobre IOF, que é tributo apenas repassado.")
 with c3:
