@@ -19,6 +19,7 @@ from datetime import datetime
 import numpy as np
 import pandas as pd
 import streamlit as st
+from reconciliacao import render_reconciliacao
 from scipy.optimize import brentq
 from scipy.stats import norm
 
@@ -563,6 +564,10 @@ O efeito é **inversamente proporcional ao prazo**: o mesmo custo de originaçã
         st.download_button("⬇️ Baixar demonstrativo do cliente (.txt)", doc.encode("utf-8"),
                            file_name=f"Demonstrativo_CET_{datetime.now():%Y-%m-%d}.txt",
                            mime="text/plain")
+
+st.divider()
+with st.expander("📊 Reconciliação de safras — EL realizado × precificado"):
+    render_reconciliacao(st)
 
 st.markdown(
     '<div class="foot">paper: '
